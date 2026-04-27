@@ -124,77 +124,98 @@ if user_text := st.chat_input("Ask a question about your documents or search Wik
     augmented_prompt = f"Context from local database:\n{retrieved_context}\n\nUser Question: {user_text}"
     
     # Compile the API payload
-    api_messages = [{"role": "system", "content": "You are a helpful analyst. Answer using the provided context or use your tools if needed."}]
+    api_messages = [{"role": "system", "content": "You are a helpful analyst. Answer using the provided context or use your tools if needed.Be creative but factual.Use your general knowledge where necessary."}]
     api_messages.extend(st.session_state.conversation_history[:-1]) # Add past history (excluding the current prompt we just added)
     api_messages.append({"role": "user", "content": augmented_prompt}) # Add the newly augmented prompt
 
-    with st.spinner("Agent 1 is thinking..."):
         # ==========================================
-        # 5. AGENT 1: THE SEARCHER (Tool Calling Logic)
-        # ==========================================
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=api_messages,
-            tools=tools,
-            tool_choice="auto",
-        )
-        
-        response_message = response.choices[0].message
-        
-        # Check if Agent 1 wants to use Wikipedia
-        if response_message.tool_calls:
-            api_messages.append(response_message) # Save the AI's request to use the tool
-            
-            for tool_call in response_message.tool_calls:
-                if tool_call.function.name == "search_wikipedia":
-                    func_args = json.loads(tool_call.function.arguments)
-                    wiki_data = search_wikipedia(func_args.get("query"))
-                    
-                    # Feed the Wikipedia data back into the message list
-                    api_messages.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": "search_wikipedia",
-                        "content": wiki_data,
-                    })
-                    
-            # Let Agent 1 generate a draft answer now that it has the Wikipedia data
-            draft_response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=api_messages,
-            )
-            draft_answer = draft_response.choices[0].message.content
-        else:
-            # If no tools were needed, this is the draft answer
-            draft_answer = response_message.content
+    # 5 & 6. THE MULTI-AGENT FEEDBACK LOOP
+    # ==========================================
+    MAX_RETRIES = 3
+    attempt = 0
+    passed_evaluation = False
+    final_reply = ""
 
-    with st.spinner("Agent 2 is evaluating..."):
-        # ==========================================
-        # 6. AGENT 2: THE EVALUATOR (Corrective Logic)
-        # ==========================================
-        evaluator_prompt = f"""
-        You are a strict grading system. 
-        User Question: {user_text}
-        Draft Answer: {draft_answer}
-        
-        Does the Draft Answer directly address the User Question without hallucinating harmful or wildly inaccurate information? 
-        Reply with exactly one word: PASS or FAIL.
-        """
-        
-        eval_response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[{"role": "user", "content": evaluator_prompt}],
-            temperature=0.0 # Force the model to be strict and consistent
-        )
-        
-        grade = eval_response.choices[0].message.content.strip().upper()
-        
-        # Determine the final output based on Agent 2's grade
-        if "PASS" in grade:
-            final_reply = draft_answer
-        else:
-            print(f"[SYSTEM] Draft failed evaluation. Draft was: {draft_answer}")
-            final_reply = "I apologize, but my internal evaluation systems flagged my drafted response for potential inaccuracies. Could you please rephrase your question or be more specific?"
+    while attempt <= MAX_RETRIES and not passed_evaluation:
+        with st.spinner(f"Agent 1 is drafting (Attempt {attempt + 1})..."):
+            
+            # --- AGENT 1 DRAFTS ---
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b", 
+                messages=api_messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+            
+            response_message = response.choices[0].message
+            
+            # Handle tool calling (Wikipedia)
+            if response_message.tool_calls:
+                api_messages.append(response_message)
+                for tool_call in response_message.tool_calls:
+                    if tool_call.function.name == "search_wikipedia":
+                        func_args = json.loads(tool_call.function.arguments)
+                        wiki_data = search_wikipedia(func_args.get("query"))
+                        api_messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": "search_wikipedia",
+                            "content": wiki_data,
+                        })
+                
+                # Regenerate draft with the new Wikipedia data
+                draft_response = client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=api_messages,
+                )
+                draft_answer = draft_response.choices[0].message.content
+            else:
+                draft_answer = response_message.content
+
+        with st.spinner("Agent 2 is evaluating..."):
+            
+            # Extract a readable string of the last 4 messages for the evaluator
+            recent_history = st.session_state.conversation_history[-5:-1]
+            history_text = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in recent_history])
+            
+            # --- AGENT 2 EVALUATES ---
+            evaluator_prompt = f"""
+            You are a strict grading system. 
+            
+            Recent Chat History:
+            {history_text}
+            
+            User's Current Question: {user_text}
+            Draft Answer: {draft_answer}
+            
+            Does the Draft Answer directly address the User Question accurately based on the chat history and provided context? 
+            If it is good, reply ONLY with 'PASS'.
+            If it is bad, reply with 'FAIL: [Explain exactly what is missing or wrong]'.
+            """
+            
+            eval_response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": evaluator_prompt}],
+                temperature=0.0 
+            )
+            
+            grade = eval_response.choices[0].message.content.strip()
+            
+            # --- THE ROUTING DECISION ---
+            if grade.startswith("PASS"):
+                final_reply = draft_answer
+                passed_evaluation = True
+            else:
+                attempt += 1
+                print(f"\n[SYSTEM] Attempt {attempt} Failed. Reason: {grade}")
+                
+                if attempt <= MAX_RETRIES:
+                    # Give Agent 1 the draft and the feedback, and force a rewrite
+                    correction_prompt = f"Your previous answer was rejected. The evaluator said: {grade}\n\nPlease rewrite your answer to fix these specific issues."
+                    api_messages.append({"role": "assistant", "content": draft_answer})
+                    api_messages.append({"role": "user", "content": correction_prompt})
+                else:
+                    final_reply = "I apologize, but my internal safety systems could not verify a highly accurate answer after multiple attempts. Please try rephrasing your question."
 
     # Print the final result to the screen
     with st.chat_message('assistant'):
