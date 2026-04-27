@@ -4,3 +4,4 @@ chromadb
 PyPDF2
 sentence-transformers
 langchain-text-splitters
+wikipedia
