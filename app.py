@@ -85,7 +85,7 @@ if user_text := st.chat_input("Ask a question about your documents..."):
         retrieved_context = "No documents have been uploaded to the database yet."
     
     augmented_prompt = f"Context Information:\n{retrieved_context}\n\nUser Question: {user_text}"
-    system_instruction = "You are an expert analyst. Answer the user's question using ONLY the provided context information. If the context does not contain the answer, explicitly state that."
+    system_instruction = "You are an expert analyst. Answer the user's question using the provided context information if avalable , if not just answer using your general knowledge just be a normal chatbot. If the context does not contain the answer or does not exist, provide a general answer based on your knowledge"
 
     # CORRECTED: Wrap the text in the required dictionary list format
     formatted_messages = [{"role": "system", "content": system_instruction}]
@@ -101,7 +101,7 @@ if user_text := st.chat_input("Ask a question about your documents..."):
     response = client.chat.completions.create(
         messages=formatted_messages, # Pass the list, not the raw string
         #max_tokens=1000,
-        model="llama-3.1-8b-instant", 
+        model="openai/gpt-oss-120b", 
     )
 
     # CORRECTED: Changed 'chat_completion' to 'response' to match the variable above
