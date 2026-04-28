@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import json
+import time
 from groq import Groq
 import wikipedia
 import chromadb
@@ -41,7 +42,7 @@ tools = [{
     "type": "function",
     "function": {
         "name": "search_wikipedia",
-        "description": "Searches Wikipedia for a topic and returns a brief summary. Use this to find factual information, history, or definitions.",
+        "description": "Searches Wikipedia for a topic and returns a brief summary. Use this only to find factual information, history, or definitions.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -52,10 +53,16 @@ tools = [{
     },
 }]
 
+def stream_text(text, delay=0.05):
+    """Yields text word-by-word to simulate streaming."""
+    for word in text.split(" "):
+        yield word + " "
+        time.sleep(delay)
+
 # ==========================================
 # 3. UI & DOCUMENT UPLOAD SIDEBAR
 # ==========================================
-st.title("Enterprise RAG Assistant")
+st.title("AI Assistant")
 
 with st.sidebar:
     st.header("Document Knowledge Base")
@@ -218,7 +225,9 @@ if user_text := st.chat_input("Ask a question about your documents or search Wik
                     final_reply = "I apologize, but my internal safety systems could not verify a highly accurate answer after multiple attempts. Please try rephrasing your question."
 
     # Print the final result to the screen
+    # Print the final result to the screen with a streaming effect
     with st.chat_message('assistant'):
-        st.markdown(final_reply)
+        # st.write_stream automatically handles the generator we built
+        st.write_stream(stream_text(final_reply))
         
     st.session_state.conversation_history.append({"role": "assistant", "content": final_reply})
